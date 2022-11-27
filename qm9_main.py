@@ -39,12 +39,9 @@ class Embed():
         self.sparse=sparse
         self.density=density    
         self.delta = delta
-        self.n = 29
+        #self.n = 29 #placeholder
         self.device = torch.device(self.device)
         self.rng = default_rng()
-        self.embed_dim = 2*3*self.n + 1
-        self.num = self.n*(self.n-1)
-        self.scald = self.n
         self.seed = 42
         self.rvs = stats.bernoulli(.5).rvs
     def centralize(self, cloud):
@@ -92,7 +89,7 @@ class Embed():
         W = torch.reshape(W, (self.num*self.embed_dim, 1, (self.n-2))).to(self.device)
         self.W = W
     def sovec_scalars(self):
-        torch.manual_seed(seed)
+        torch.manual_seed(self.seed)
         all_idx_list = torch.arange(self.n).to(self.device)
         perms = torch.tensor(list(it.permutations(all_idx_list, r=2))).to(self.device)
         perms_one_hot = one_hot(perms, num_classes=self.n).to(float32).to(self.device)
@@ -103,12 +100,12 @@ class Embed():
         comp_mat = F.one_hot( comp_indices, num_classes=self.n ).to(float32).squeeze().to(self.device)
         comp_mat = torch.transpose(comp_mat,1,2).to(self.device)
         ug_mat = torch.cat((torch.transpose(perms_one_hot,1,2), comp_mat), dim=2).to(self.device) # some games with the transpose
-        cloud_big = self.cloud.expand(self.num, 3, self.n ).to(self.device)
+        cloud_big = self.cloud.expand(self.num, 4, self.n ).to(self.device)
         big = torch.bmm( cloud_big, ug_mat ).to(self.device)
         scalars = big[:,3,:2].clone().to(self.device)#decompose to lower 4th row and point cloud
         scalars = scalars.reshape(self.num, 2, 1).to(self.device)
         rest_scalars, indices = torch.sort(big[:,3,2:].clone(), dim=1)
-        rest_scalars = rest_scalars.reshape(self.num, (self.n-2), 1).to(self.device)
+        self.rest_scalars = rest_scalars.reshape(self.num, (self.n-2), 1).to(self.device)
         big = big[:,:3,:].to(self.device)
         a = big[:, :, 0].to(self.device)
         b = big[:, :, 1].to(self.device)
@@ -168,11 +165,14 @@ class Embed():
         self.final = torch.bmm( self.W_2 , first_sorted).squeeze().to(self.device)
     def forward(self, cloud, n):
         self.n = n
+        self.embed_dim = 2*3*self.n + 1
+        self.num = self.n*(self.n-1)
+        self.scald = self.n
         self.process_cloud(cloud)
         self.wf()
         self.Wf()
         self.sovec_scalars()
-        self.distance()
+        self.distances()
         self.w_2f()
         self.W_2f()
         print(self.W)
@@ -184,8 +184,14 @@ def main():
     print("hi")
     cloud = torch.randn(4, 9)
     embed = Embed()
+    perm = torch.randperm(9)
+    orth_linear = orthogonal(nn.Linear(3, 3))
+    Q = orth_linear.weight
+    upper = cloud[:3,:]
+    upper = torch.matmul(Q, upper)
+    lower = cloud[3,:]
+    cloud2 = torch.vstack([upper, lower])
+    print(torch.allclose(embed.forward(cloud, 9), embed.forward( cloud2[:, perm], 9)))
 
-    print(embed.forward(cloud, 9))
-
-if __name__ == 'main':
+if __name__ == "__main__":
     main()
