@@ -145,6 +145,9 @@ class Embed():
         ones = torch.mul(torch.ones(self.num),self.embed_dim).to(dtype=torch.int32).to(self.device) #just to pass to repeat interleave, means nothing
         projections = torch.repeat_interleave(projections, ones, dim=0).to(self.device)
         projections = projections.transpose(1,2).to(self.device)
+        #######################################################################
+        ##################initial embedding####################################
+        #######################################################################
         unsorted = torch.bmm(projections, self.w).to(self.device)
         sorted, indices = torch.sort(unsorted, dim=1)
         dot_prod = torch.bmm( self.W, sorted).to(self.device)
@@ -152,24 +155,35 @@ class Embed():
         gram = gram.reshape((self.num, 9 , 1)).to(self.device)
         self.append = torch.cat(( self.scalars, self.rest_scalars,gram,dot_prod), dim=1).reshape(1, self.num, self.embed_dim + 9 + self.scald).to(self.device)
     def w_2(self):
-        if sparse:
-        S = random(embed_dim, embed_dim + 9 + scald, density=density, random_state=rng, data_rvs=rvs)
-        w_2 = .01*torch.tensor(S.A, dtype=torch.float32).reshape(embed_dim, embed_dim + 9 + scald, 1).to(device)
-    if not sparse:
-        torch.manual_seed(42)
-        w_2 = torch.randn(embed_dim, embed_dim + 9 + scald, 1 ).to(device)*0.01
-
+        if self.sparse:
+            S = random(self.embed_dim, self.embed_dim + 9 + self.scald, density=self.density, random_state=self.rng, data_rvs=self.rvs)
+            self.w_2 = 0.01*torch.tensor(S.A, dtype=torch.float32).reshape(self.embed_dim, self.embed_dim + 9 + self.scald, 1).to(self.device)
+        if not self.sparse:
+            torch.manual_seed(42)
+            self.w_2 = torch.randn(self.embed_dim, self.embed_dim + 9 + self.scald, 1 ).to(self.device)*0.01
     def W_2(self):
-        if sparse:
-        S = random(embed_dim, num, density=density, random_state=rng, data_rvs=rvs)
-        W_2 = .01*torch.tensor(S.A, dtype=torch.float32).reshape(embed_dim, 1, num).to(device)
-    if not sparse:
-        torch.manual_seed(42)
-        W_2 = torch.randn(embed_dim, 1, num ).to(device)*0.01
+        if self.sparse:
+            S = random(self.embed_dim, self.num, density=self.density, random_state=self.rng, data_rvs=self.rvs)
+            self.W_2 = 0.01*torch.tensor(S.A, dtype=torch.float32).reshape(self.embed_dim, 1, self.num).to(self.device)
+        if not self.sparse:
+            torch.manual_seed(42)
+            self.W_2 = torch.randn(self.embed_dim, 1, self.num ).to(self.device)*0.01
+    def final_embed(self):
+        embed_2 = self.append.expand( ( self.embed_dim, num, self.embed_dim + 9 + self.scald ) )
+        first = torch.bmm(embed_2, self.w_2).to(self.device)
+        first_sorted, indices = torch.sort(first, dim = 1)
+        self.final = torch.bmm( self.W_2 , first_sorted).squeeze().to(self.device)
     def forward(self, cloud, n):
         self.n = n
-        cloud = self.process_cloud(cloud)
-
+        self.process_cloud(cloud)
+        self.w()
+        self.W()
+        self.sovec_scalars()
+        self.distance()
+        self.w_2()
+        self.W_2()
+        self.final_embed()
+        return self.final.clone()
 
 def forward(cloud, sparse=False,density=1,delta = 1., n=8):
     d_cloud = cloud[:3,:].clone().to(device)
