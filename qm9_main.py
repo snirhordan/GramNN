@@ -14,36 +14,42 @@ import torch.nn.functional as F
 from torch.nn.functional import one_hot
 from torch.nn.utils.parametrizations import orthogonal
 from torch import nn
-from scipy.sparse import random
 from scipy.stats import rv_continuous
-from scipy.sparse import random
 from scipy import stats
 from numpy.random import default_rng
 from scipy.sparse import random
 from scipy import stats
-from numpy.random import default_rng
 from scipy.stats import bernoulli
-
+import numpy as np
 
 
 
 class Embed():
-    def __init__(self, sparse=False, density = 1, delta = 1.):
+    """
+    Embedding a 3xn point cloud with scalar node features.
+    WARNING: Works with tolerance of only 1e-9 when weights in O(0.001) !!! (Tested it achieves it)
+    """
+    def __init__(self, sparse1=True, sparse2 = True,density = 1, delta = 5e-10):
         if torch.cuda.is_available():
-            print('cuda')
             self.device = torch.device('cuda')
         else:
-            print('cpu')
             self.device = torch.device('cpu')
         self.d = 3
-        self.sparse=sparse
+        self.sparse1=sparse1
+        self.sparse2 = sparse2
         self.density=density    
         self.delta = delta
         #self.n = 29 #placeholder
         self.device = torch.device(self.device)
-        self.rng = default_rng()
         self.seed = 42
-        self.rvs = stats.bernoulli(.5).rvs
+        self.universal = 29
+        self.universal_dim = 2*3*29 + 1
+        self.universal_embed_dim = 2*3*self.n + 1
+        self.num = self.n*(self.n-1)
+        
+        #self.rvs = stats.norm(scale=0.01).rvs
+        self.rvs = stats.uniform(loc=-.001, scale=.002).rvs
+        #self.rvs = stats.bernoulli(.5).rvs
     def centralize(self, cloud):
         """
         Recieve 3xn point cloud
@@ -65,24 +71,26 @@ class Embed():
         recieves 4xn QM9 cloud
         returns centralized positions cloud and normalized node features
         """
-        d_cloud = self.centralize(cloud[:3,:].clone().to(self.device))
+        self.d_cloud = self.centralize(cloud[:3,:].clone().to(self.device))
         lower = self.normalize_features(cloud[3,:].clone().to(self.device))
-        self.cloud = torch.vstack((d_cloud,lower)).to(self.device)
+        self.cloud = torch.vstack((self.d_cloud.clone(),lower)).to(self.device)
     def wf(self):
-        if self.sparse:
-            S = random(self.embed_dim, 3, density=self.density, random_state=self.rng, data_rvs=self.rvs)
-            w = 0.01*torch.tensor(S.A, dtype=torch.float32).reshape(1, self.embed_dim, 3).to(self.device)
-        elif not self.sparse:
+        if self.sparse1:
+            np.random.seed(seed=self.seed)
+            S = random(self.embed_dim, 3, density=self.density, data_rvs=self.rvs)
+            w = torch.tensor(S.A, dtype=torch.float32).reshape(1, self.embed_dim, 3).to(self.device)
+        elif not self.sparse1:
             torch.manual_seed(self.seed)
             w = 0.01*torch.randn(1, self.embed_dim, 3).to(self.device)
         w = w.repeat(self.num, 1, 1).to(self.device)
         w = torch.reshape(w, (self.num*self.embed_dim, 3, 1)).to(self.device)
         self.w = w
     def Wf(self):
-        if self.sparse:
-            S = random( self.embed_dim, self.n-2, density=self.density, random_state=self.rng, data_rvs=self.rvs)
-            W= 0.01*torch.tensor(S.A, dtype=torch.float32).reshape(1, self.embed_dim, self.n-2).to(self.device)
-        elif not self.sparse:
+        if self.sparse1:
+            np.random.seed(seed=self.seed)
+            S = random( self.embed_dim, self.n-2, density=self.density, data_rvs=self.rvs)
+            W= torch.tensor(S.A, dtype=torch.float32).reshape(1, self.embed_dim, self.n-2).to(self.device)
+        elif not self.sparse1:
             torch.manual_seed(self.seed)
             W= 0.01*torch.randn(1, self.embed_dim, self.n-2).to(self.device)
         W = W.repeat(self.num, 1, 1).to(self.device)
@@ -110,15 +118,16 @@ class Embed():
         a = big[:, :, 0].to(self.device)
         b = big[:, :, 1].to(self.device)
         c = torch.cross(a, b).reshape(self.num, 3,1).to(self.device) #torch.linalg.cross not deprecated
-        sovec = torch.cat([c, big],dim= 2).to(self.device) # this is all the point clouds arranged such that taking their uuper gram matrix seals the deal
+        sovec = torch.cat([c, big],dim= 2).to(self.device) # this is all the point clouds arranged such that taking their uuper gram matrix seals the deal (still point clouds)
         self.sovec, self.scalars = sovec, scalars
     def distances(self):
         #######################################################################
         ##################dist matrix##########################################
         #######################################################################
         gram_part = torch.transpose(self.sovec[:,:,:3].clone(), 1,2).repeat(1,(self.n+1),1).to(self.device)
+        sovec_t = self.sovec.clone().transpose(1,2)
         onew = 3*torch.ones((self.n+1), dtype=torch.int32).to(self.device)
-        gram_mul = torch.repeat_interleave(self.sovec.clone().transpose(1,2), onew, dim=1).to(self.device)
+        gram_mul = torch.repeat_interleave(sovec_t, onew, dim=1).to(self.device)
         pdist = nn.PairwiseDistance(p=2)
         output = pdist(gram_mul, gram_part).reshape(self.num,(self.n+1),3).transpose(1,2).to(self.device)
         #######################################################################
@@ -131,38 +140,44 @@ class Embed():
         addition = (add_candidate + a).to(self.device)
         output[:,:,:3] = addition.to(self.device)
         ug_so = torch.exp(torch.div((-1)*output.clone(), self.delta)).clone().to(self.device)
-        gram, projections = torch.split( ug_so, [3, (self.n-2)] , dim=2 )
+        self.gram, self.projections = torch.split( ug_so, [3, (self.n-2)] , dim=2 )
         ones = torch.mul(torch.ones(self.num),self.embed_dim).to(dtype=torch.int32).to(self.device) #just to pass to repeat interleave, means nothing
-        projections = torch.repeat_interleave(projections, ones, dim=0).to(self.device)
-        projections = projections.transpose(1,2).to(self.device)
+        self.projections = torch.repeat_interleave(self.projections, ones, dim=0).to(self.device)
+        self.projections = self.projections.transpose(1,2).to(self.device)
+    def init_embed(self):
         #######################################################################
         ##################initial embedding####################################
         #######################################################################
-        unsorted = torch.bmm(projections, self.w).to(self.device)
-        sorted, indices = torch.sort(unsorted, dim=1)
+        unsorted = torch.bmm(self.projections, self.w).to(self.device)
+        sorted, indices = torch.sort(unsorted, dim=1) ##possible to change to pointwise summation function
         dot_prod = torch.bmm( self.W, sorted).to(self.device)
-        dot_prod = dot_prod.reshape((self.num, self.embed_dim, 1)).to(self.device)
-        gram = gram.reshape((self.num, 9 , 1)).to(self.device)
-        self.append = torch.cat(( self.scalars, self.rest_scalars,gram,dot_prod), dim=1).reshape(1, self.num, self.embed_dim + 9 + self.scald).to(self.device)
+        self.dot_prod = dot_prod.reshape((self.num, self.embed_dim, 1)).to(self.device)
+    def padding(self):
+        zeros = torch.zeros(  )
+        print(self.dot_prod.size())
     def w_2f(self):
-        if self.sparse:
-            S = random(self.embed_dim, self.embed_dim + 9 + self.scald, density=self.density, random_state=self.rng, data_rvs=self.rvs)
-            self.w_2 = 0.01*torch.tensor(S.A, dtype=torch.float32).reshape(self.embed_dim, self.embed_dim + 9 + self.scald, 1).to(self.device)
-        if not self.sparse:
+        if self.sparse2:
+            np.random.seed(seed=self.seed)
+            S = random(self.embed_dim, self.embed_dim + 9 + self.scald, density=self.density, data_rvs=self.rvs)
+            self.w_2 = torch.tensor(S.A, dtype=torch.float32).reshape(self.embed_dim, self.embed_dim + 9 + self.scald, 1).to(self.device)
+        if not self.sparse2:
             torch.manual_seed(42)
             self.w_2 = torch.randn(self.embed_dim, self.embed_dim + 9 + self.scald, 1 ).to(self.device)*0.01
     def W_2f(self):
-        if self.sparse:
-            S = random(self.embed_dim, self.num, density=self.density, random_state=self.rng, data_rvs=self.rvs)
-            self.W_2 = 0.01*torch.tensor(S.A, dtype=torch.float32).reshape(self.embed_dim, 1, self.num).to(self.device)
-        if not self.sparse:
+        if self.sparse2:
+            np.random.seed(seed=self.seed)
+            S = random(self.embed_dim, self.num, density=self.density, data_rvs=self.rvs)
+            self.W_2 = torch.tensor(S.A, dtype=torch.float32).reshape(self.embed_dim, 1, self.num).to(self.device)
+        if not self.sparse2:
             torch.manual_seed(42)
             self.W_2 = torch.randn(self.embed_dim, 1, self.num ).to(self.device)*0.01
     def final_embed(self):
+        self.gram = self.gram.reshape((self.num, 9 , 1)).to(self.device)
+        self.append = torch.cat(( self.scalars, self.rest_scalars, self.gram, self.dot_prod), dim=1).reshape(1, self.num, self.embed_dim + 9 + self.scald).to(self.device)
         embed_2 = self.append.expand( ( self.embed_dim, self.num, self.embed_dim + 9 + self.scald ) )
         first = torch.bmm(embed_2, self.w_2).to(self.device)
-        first_sorted, indices = torch.sort(first, dim = 1)
-        self.final = torch.bmm( self.W_2 , first_sorted).squeeze().to(self.device)
+        first_sorted, indices = torch.sort(first, dim = 1) ##possible to change to pointwise summation function
+        return torch.bmm( self.W_2 , first_sorted).squeeze().to(self.device)
     def forward(self, cloud, n):
         self.n = n
         self.embed_dim = 2*3*self.n + 1
@@ -173,25 +188,30 @@ class Embed():
         self.Wf()
         self.sovec_scalars()
         self.distances()
+        self.init_embed()
         self.w_2f()
         self.W_2f()
-        print(self.W)
-        self.final_embed()
-        return self.final.clone()
+        return self.final_embed()
+
+
 
 
 def main():
-    print("hi")
-    cloud = torch.randn(4, 9)
-    embed = Embed()
-    perm = torch.randperm(9)
-    orth_linear = orthogonal(nn.Linear(3, 3))
-    Q = orth_linear.weight
-    upper = cloud[:3,:]
-    upper = torch.matmul(Q, upper)
-    lower = cloud[3,:]
-    cloud2 = torch.vstack([upper, lower])
-    print(torch.allclose(embed.forward(cloud, 9), embed.forward( cloud2[:, perm], 9)))
+    for i in range(100):
+        cloud2 = torch.randn(3,8)
+        ones = torch.arange(8)
+        cloud3 = torch.vstack([cloud2, ones])
+        orth_linear = orthogonal(nn.Linear(3, 3))
+        Q = orth_linear.weight
+        cloud2o = torch.matmul(Q, cloud2)
+        cloud4 = torch.vstack([cloud2o, ones])
+        embed = Embed()
+        #test separation of pc's in same O(d) orbit
+        #print(embed.forward(cloud3, 8))
+        embed2 = Embed()
+        #print(embed2.forward(cloud4, 8))
+        assert(torch.allclose(embed.forward(cloud3, 8), embed2.forward(cloud4, 8), atol=1e-9))
+
 
 if __name__ == "__main__":
     main()
